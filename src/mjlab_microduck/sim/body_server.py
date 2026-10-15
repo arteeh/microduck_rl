@@ -190,6 +190,9 @@ class World:
                 imu = self.model.site(prefix + "head_imu")
                 camera = self.model.site(prefix + "head_camera")
                 imu.pos[:] = camera.pos
+                # The exported identity mount compiled to a same-frame fast path.
+                # A new chip rotation must disable it or MuJoCo ignores site.quat.
+                self.model.site_sameframe[imu.id] = 0
                 head = np.zeros(4)
                 # CAD camera-site -> forward/left/up head, then chip -> head.
                 cv = np.zeros(4)

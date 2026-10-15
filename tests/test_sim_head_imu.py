@@ -159,3 +159,6 @@ def test_beta_world_uses_face_axes_and_usable_l8_range():
     assert body.head_imu.samples[-1]["quat"]
     force = body.head_imu.samples[-1]["accel"]
     assert 9 < np.linalg.norm(force) < 11
+    head_force = np.zeros(3)
+    mujoco.mju_rotVecQuat(head_force, np.array(force), np.array([.5, .5, -.5, -.5]))
+    np.testing.assert_allclose(head_force, [0, 0, 9.81], atol=.02)
