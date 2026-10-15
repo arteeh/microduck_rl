@@ -54,9 +54,10 @@ import numpy as np
 
 from mjlab_microduck.sim.camera import FPS as CAMERA_FPS
 from mjlab_microduck.sim.camera import Camera, FrameHandler, FrameServer
+from mjlab_microduck.sim.head_imu import HeadImu
 from mjlab_microduck.sim.tof import COLS, ROWS, Tof
 
-PROTOCOL = 1
+PROTOCOL = 2
 
 # What the policies were trained at, and what `scripts/infer_policy.py` sets. The scenes ship 0.002;
 # with that script's decimation of 4 this is exactly the 50 Hz the daemon's control loop runs at.
@@ -175,7 +176,9 @@ class World:
     must not wait on the solver, for the same reason a real bus read does not wait on a servo.
     """
 
-    def __init__(self, scene: Path, count: int = 1):
+    def __init__(self, scene: Path, count: int = 1, *, imu_noise=0.0, tof_noise=1.0, seed=0):
+        self.imu_noise, self.tof_noise, self.seed = imu_noise, tof_noise, seed
+        self.epoch_ns = time.monotonic_ns()
         self.model = build_world(scene, count)
         self.model.opt.timestep = TIMESTEP
         self.data = mujoco.MjData(self.model)
@@ -198,6 +201,16 @@ class World:
                 # it cannot simply not be stepped — and a hand steadying one robot while another
                 # walks about is an ordinary thing for a room to contain.
                 for body in self.bodies:
+                    if not body.released:
+                        # The hand supporting this duck cancels its acceleration.
+                        self.data.qacc[body.trunk_dof:body.trunk_dof + 6] = 0
+                        self.data.qacc[body.qvel_adr] = 0
+                if any(not body.released for body in self.bodies):
+                    mujoco.mj_rnePostConstraint(self.model, self.data)
+                    mujoco.mj_sensorAcc(self.model, self.data)
+                for body in self.bodies:
+                    stamp = self.epoch_ns + round((self.data.time - self.model.opt.timestep) * 1e9)
+                    body.head_imu.capture(self.data, stamp)
                     if not body.released:
                         body.restore()
 
@@ -236,7 +249,11 @@ class Body:
         )
         # The depth sensor, on the model's own `tof` site — so a head that turns takes it along,
         # which is what makes `robot.look` a way to scan a room.
-        self.tof = Tof(model, ident(mujoco.mjtObj.mjOBJ_SITE, "tof"), seed=index)
+        self.tof = Tof(
+            model, ident(mujoco.mjtObj.mjOBJ_SITE, "tof"),
+            seed=world.seed + index, noise=world.tof_noise,
+        )
+        self.head_imu = HeadImu(model, self.prefix, noise=world.imu_noise, seed=world.seed + index)
         # Built only when this duck is one of `--cameras`: a renderer costs 12 ms a frame, which is
         # forty times what stepping four ducks' physics costs.
         self.camera: Camera | None = None
@@ -412,7 +429,7 @@ class Handler(socketserver.StreamRequestHandler):
                 raise ValueError(
                     f"the daemon speaks protocol {asked} and this simulator speaks {PROTOCOL}"
                 )
-            return {"protocol": PROTOCOL}
+            return {"protocol": PROTOCOL, "clock_ns": time.monotonic_ns()}
         if op == "read":
             return body.sensors()
         if op == "write":
@@ -426,6 +443,9 @@ class Handler(socketserver.StreamRequestHandler):
             return {}
         if op == "slow":
             return body.slow_sensors()
+        if op == "head_imu":
+            with body.world.lock:
+                return body.head_imu.since(int(request.get("after", 0)), time.monotonic_ns())
         if op == "tof":
             return body.depth()
         raise ValueError(f"unknown op {op!r}")
@@ -469,6 +489,7 @@ def run(world: World, headless: bool) -> None:
     eyes = [b for b in world.bodies if b.camera is not None]
     passes_per_eye = max(1, round((1.0 / CAMERA_FPS) / period))
     step = 0
+    world.epoch_ns = time.monotonic_ns() - round(world.data.time * 1e9)
     next_step = time.perf_counter()
     behind = 0
     try:
@@ -489,6 +510,7 @@ def run(world: World, headless: bool) -> None:
                     flush=True,
                 )
                 next_step = time.perf_counter()
+                world.epoch_ns = time.monotonic_ns() - round(world.data.time * 1e9)
             step += 1
             if viewer is not None and step % passes_per_frame == 0:
                 viewer.sync()
@@ -532,7 +554,12 @@ def main() -> None:
         "which the standing policy rises from on its own. HOME is infer_policy.py's placement — "
         "home pose, trunk 0.125 m, upright — and STAND and FOLD are the scene's other poses",
     )
+    parser.add_argument("--imu-noise", type=float, default=0.0, help="BMI088 noise/offset ratio")
+    parser.add_argument("--tof-noise", type=float, default=1.0, help="ToF range noise ratio")
+    parser.add_argument("--seed", type=int, default=0, help="sensor random seed")
     args = parser.parse_args()
+    if any(not np.isfinite(v) or v < 0 for v in (args.imu_noise, args.tof_noise)):
+        parser.error("sensor noise ratios must be finite and nonnegative")
 
     if not args.scene.exists():
         raise SystemExit(
@@ -542,7 +569,9 @@ def main() -> None:
     if args.ducks < 1:
         raise SystemExit("--ducks needs at least one duck")
 
-    world = World(args.scene, args.ducks)
+    world = World(
+        args.scene, args.ducks, imu_noise=args.imu_noise, tof_noise=args.tof_noise, seed=args.seed,
+    )
     pose, trunk_z = pose_table(args.scene, args.keyframe)
     wanted = set()
     if args.cameras.strip() == "all":

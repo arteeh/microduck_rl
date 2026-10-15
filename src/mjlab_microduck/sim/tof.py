@@ -37,7 +37,10 @@ class Tof:
     sensor with it, which is the whole point of `robot.look` scanning a room.
     """
 
-    def __init__(self, model: mujoco.MjModel, site: int, seed: int = 0):
+    def __init__(self, model: mujoco.MjModel, site: int, seed: int = 0, noise: float = 1.0):
+        if not np.isfinite(noise) or noise < 0:
+            raise ValueError("ToF noise ratio must be finite and nonnegative")
+        self.noise = noise
         self.model = model
         self.site = site
         self.random = np.random.default_rng(seed)
@@ -93,7 +96,7 @@ class Tof:
             # couple of centimetres at the far end. Without it a simulated map is suspiciously
             # crisp, and every filter downstream goes untested.
             sigma = 0.003 + 0.02 * (hit / MAX_RANGE)
-            measured = max(0.0, hit + self.random.normal(0.0, sigma))
+            measured = max(0.0, hit + self.random.normal(0.0, sigma * self.noise))
             distance_mm[zone] = int(measured * 1000.0)
             status[zone] = STATUS_VALID
         return distance_mm, status
