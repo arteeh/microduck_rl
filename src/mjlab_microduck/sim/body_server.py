@@ -54,7 +54,7 @@ import numpy as np
 
 from mjlab_microduck.sim.camera import FPS as CAMERA_FPS
 from mjlab_microduck.sim.camera import Camera, FrameHandler, FrameServer
-from mjlab_microduck.sim.head_imu import HeadImu
+from mjlab_microduck.sim.head_imu import BetaHeadImu, HeadImu
 from mjlab_microduck.sim.tof import COLS, ROWS, Tof
 
 PROTOCOL = 2
@@ -176,11 +176,26 @@ class World:
     must not wait on the solver, for the same reason a real bus read does not wait on a servo.
     """
 
-    def __init__(self, scene: Path, count: int = 1, *, imu_noise=0.0, tof_noise=1.0, seed=0):
+    def __init__(self, scene: Path, count: int = 1, *, imu_noise=0.0, tof_noise=1.0, seed=0, board="zero3"):
         self.imu_noise, self.tof_noise, self.seed = imu_noise, tof_noise, seed
+        self.board = board
         self.epoch_ns = time.monotonic_ns()
         self.model = build_world(scene, count)
         self.model.opt.timestep = TIMESTEP
+        if board == "beta":
+            # The face-board translation is not in this CAD export. Co-locate its
+            # chip with the camera explicitly; use robotd's measured chip axes.
+            for index in range(count):
+                prefix = duck_prefix(index)
+                imu = self.model.site(prefix + "head_imu")
+                camera = self.model.site(prefix + "head_camera")
+                imu.pos[:] = camera.pos
+                head = np.zeros(4)
+                # CAD camera-site -> forward/left/up head, then chip -> head.
+                cv = np.zeros(4)
+                mujoco.mju_mulQuat(cv, camera.quat, np.array([.5, -.5, .5, -.5]))
+                mujoco.mju_mulQuat(head, cv, np.array([.5, .5, -.5, .5]))
+                mujoco.mju_mulQuat(imu.quat, head, np.array([.5, .5, -.5, -.5]))
         self.data = mujoco.MjData(self.model)
         self.lock = threading.Lock()
         self.bodies: list[Body] = []
@@ -252,8 +267,11 @@ class Body:
         self.tof = Tof(
             model, ident(mujoco.mjtObj.mjOBJ_SITE, "tof"),
             seed=world.seed + index, noise=world.tof_noise,
+            minimum=.12 if world.board == "beta" else 0,
+            maximum=3.5 if world.board == "beta" else 4.0,
         )
-        self.head_imu = HeadImu(model, self.prefix, noise=world.imu_noise, seed=world.seed + index)
+        self.head_imu = (BetaHeadImu if world.board == "beta" else HeadImu)(
+            model, self.prefix, noise=world.imu_noise, seed=world.seed + index)
         # Built only when this duck is one of `--cameras`: a renderer costs 12 ms a frame, which is
         # forty times what stepping four ducks' physics costs.
         self.camera: Camera | None = None
@@ -366,7 +384,8 @@ class Body:
         """
         with self.world.lock:
             distance_mm, status = self.tof.frame(self.world.data)
-        return {"rows": ROWS, "cols": COLS, "distance_mm": distance_mm, "status": status}
+        return {"rows": ROWS, "cols": COLS, "distance_mm": distance_mm, "status": status,
+                "sensor": "VL53L8CX" if self.world.board == "beta" else "VL53L5CX"}
 
     # ── what the daemon commands ──────────────────────────────────────────
 
@@ -429,7 +448,7 @@ class Handler(socketserver.StreamRequestHandler):
                 raise ValueError(
                     f"the daemon speaks protocol {asked} and this simulator speaks {PROTOCOL}"
                 )
-            return {"protocol": PROTOCOL, "clock_ns": time.monotonic_ns()}
+            return {"protocol": PROTOCOL, "clock_ns": time.monotonic_ns(), "board": body.world.board}
         if op == "read":
             return body.sensors()
         if op == "write":
@@ -554,6 +573,7 @@ def main() -> None:
         "which the standing policy rises from on its own. HOME is infer_policy.py's placement — "
         "home pose, trunk 0.125 m, upright — and STAND and FOLD are the scene's other poses",
     )
+    parser.add_argument("--board", choices=("zero3", "beta"), default="zero3")
     parser.add_argument("--imu-noise", type=float, default=0.0, help="BMI088 noise/offset ratio")
     parser.add_argument("--tof-noise", type=float, default=1.0, help="ToF range noise ratio")
     parser.add_argument("--seed", type=int, default=0, help="sensor random seed")
@@ -570,7 +590,7 @@ def main() -> None:
         raise SystemExit("--ducks needs at least one duck")
 
     world = World(
-        args.scene, args.ducks, imu_noise=args.imu_noise, tof_noise=args.tof_noise, seed=args.seed,
+        args.scene, args.ducks, imu_noise=args.imu_noise, tof_noise=args.tof_noise, seed=args.seed, board=args.board,
     )
     pose, trunk_z = pose_table(args.scene, args.keyframe)
     wanted = set()

@@ -121,3 +121,41 @@ def test_exact_tof_measures_plane():
         if direction[2] < -0.25:
             assert status[i] == 5
             assert distances[i] == pytest.approx(int(-1000 / direction[2]), abs=1)
+
+
+def test_beta_game_rotation_rate_and_seeded_chip_noise():
+    from mjlab_microduck.sim.head_imu import BetaHeadImu
+
+    model = sensor_model()
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    data.qacc[:] = 0
+    mujoco.mj_rnePostConstraint(model, data)
+    mujoco.mj_sensorAcc(model, data)
+    imu = BetaHeadImu(model)
+    # Analytic chip motion, not orientation truth: one rad/s about gravity.
+    data.sensordata[model.sensor("head_gyro").adr[0] :][:3] = [0, 0, 1]
+    for tick in range(401):
+        imu.capture(data, 1_000_000_000 + tick * 5_000_000)
+    samples = imu.since(0)["samples"]
+    assert 120 <= len(samples) <= 121
+    np.testing.assert_allclose(np.diff([s["t_ns"] for s in samples]), 1e9 / 60, atol=1)
+    q = samples[-1]["quat"]
+    assert abs(2 * np.arctan2(q[3], q[0]) - 2) < 0.02
+    a, b = (BetaHeadImu(model, noise=1, seed=17) for _ in range(2))
+    for tick in range(100):
+        a.capture(data, tick * 5_000_000)
+        b.capture(data, tick * 5_000_000)
+    assert a.since(0) == b.since(0)
+
+
+def test_beta_world_uses_face_axes_and_usable_l8_range():
+    world = World(DEFAULT_SCENE, board="beta")
+    body = Body(world, 0)
+    body.place(None, 0.125, 0)
+    world.bodies.append(body)
+    world.step(20)
+    assert body.tof.minimum == 0.12 and body.tof.maximum == 3.5
+    assert body.head_imu.samples[-1]["quat"]
+    force = body.head_imu.samples[-1]["accel"]
+    assert 9 < np.linalg.norm(force) < 11
