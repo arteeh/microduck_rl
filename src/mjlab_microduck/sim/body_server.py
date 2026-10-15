@@ -59,6 +59,10 @@ from mjlab_microduck.sim.tof import COLS, ROWS, Tof
 
 PROTOCOL = 2
 
+# Each board's head camera mount, degrees clockwise from upright: `Board::camera_mount_degrees`
+# in microduck's robotd-params, and the `rotate` mediad announces for that board.
+CAMERA_MOUNT = {"zero3": 90, "beta": 0}
+
 # What the policies were trained at, and what `scripts/infer_policy.py` sets. The scenes ship 0.002;
 # with that script's decimation of 4 this is exactly the 50 Hz the daemon's control loop runs at.
 # Not a performance knob: the BAM actuator fit, the contact solref and the joint armature are all
@@ -617,7 +621,9 @@ def main() -> None:
         servers.append(server)
 
         if index in wanted:
-            body.camera = Camera(world.model, f"{body.prefix}head_camera")
+            body.camera = Camera(
+                world.model, f"{body.prefix}head_camera", mount=CAMERA_MOUNT[world.board]
+            )
             frames = FrameServer((args.host, args.frame_port + index), FrameHandler)
             frames.camera = body.camera
             frames.fps = args.camera_fps
