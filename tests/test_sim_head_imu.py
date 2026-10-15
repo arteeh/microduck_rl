@@ -140,6 +140,11 @@ def test_beta_game_rotation_rate_and_seeded_chip_noise():
     samples = imu.since(0)["samples"]
     assert 120 <= len(samples) <= 121
     np.testing.assert_allclose(np.diff([s["t_ns"] for s in samples]), 1e9 / 60, atol=1)
+    lsb = np.array([np.radians(0.0175)] * 3 + [0.000122 * 9.80665] * 3)
+    for sample in samples:
+        counts = np.r_[sample["gyro"], sample["accel"]] / lsb
+        np.testing.assert_allclose(counts, np.rint(counts), atol=1e-9)
+        assert np.max(np.abs(counts)) <= 32768
     q = samples[-1]["quat"]
     assert abs(2 * np.arctan2(q[3], q[0]) - 2) < 0.02
     a, b = (BetaHeadImu(model, noise=1, seed=17) for _ in range(2))
@@ -160,5 +165,5 @@ def test_beta_world_uses_face_axes_and_usable_l8_range():
     force = body.head_imu.samples[-1]["accel"]
     assert 9 < np.linalg.norm(force) < 11
     head_force = np.zeros(3)
-    mujoco.mju_rotVecQuat(head_force, np.array(force), np.array([.5, .5, -.5, -.5]))
-    np.testing.assert_allclose(head_force, [0, 0, 9.81], atol=.02)
+    mujoco.mju_rotVecQuat(head_force, np.array(force), np.array([0.5, 0.5, -0.5, -0.5]))
+    np.testing.assert_allclose(head_force, [0, 0, 9.81], atol=0.02)

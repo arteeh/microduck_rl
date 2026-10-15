@@ -110,6 +110,8 @@ class BetaHeadImu(HeadImu):
         while self.next_sample <= t_ns:
             alpha = (self.next_sample - old_time) / max(t_ns - old_time, 1)
             sample = old + np.clip(alpha, 0, 1) * (values - old)
+            # Sampling a fractional physics tick must still return integer ADC counts.
+            sample = np.clip(np.rint(sample / lsb), -32768, 32767) * lsb
             gyro, accel = sample[:3], sample[3:]
             magnitude = np.linalg.norm(accel)
             if self.quat is None:
@@ -147,7 +149,10 @@ class BetaHeadImu(HeadImu):
                     "seq": self.sequence,
                     "t_ns": round(self.next_sample),
                     "gyro": gyro.tolist(),
-                    "accel": self.filtered_accel.tolist(),
+                    "accel": (
+                        np.clip(np.rint(self.filtered_accel / lsb[3:]), -32768, 32767)
+                        * lsb[3:]
+                    ).tolist(),
                     "quat": fused,
                     "temp_c": 32.0,
                 }
