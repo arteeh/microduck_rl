@@ -66,7 +66,14 @@ class Camera:
     loop touches it.
     """
 
-    def __init__(self, model: mujoco.MjModel, name: str, width: int = WIDTH, height: int = HEIGHT):
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        name: str,
+        width: int = WIDTH,
+        height: int = HEIGHT,
+        mount: int = 90,
+    ):
         self.camera = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, name)
         if self.camera < 0:
             raise SystemExit(f"the model has no camera {name!r}")
@@ -93,6 +100,17 @@ class Camera:
         fixed = np.zeros(4)
         mujoco.mju_mulQuat(fixed, model.cam_quat[self.camera], turn)
         model.cam_quat[self.camera] = fixed
+        # `mount` is the board's camera mount, degrees clockwise from upright — robotd-params'
+        # `Board::camera_mount_degrees`, which is also the `rotate` mediad announces: 90 on the
+        # Zero 3W's IMX219, 0 on the beta's GC2093. The MJCF camera is the Zero 3W's, so any other
+        # mount is a roll about the view axis after the turn above (the two do not commute).
+        if mount not in (0, 90, 180, 270):
+            raise ValueError("the camera mount is a quarter turn")
+        if mount != 90:
+            half = np.radians(90 - mount) / 2
+            roll = np.array([np.cos(half), 0.0, 0.0, np.sin(half)])
+            mujoco.mju_mulQuat(fixed, model.cam_quat[self.camera].copy(), roll)
+            model.cam_quat[self.camera] = fixed
         self.renderer = mujoco.Renderer(model, height=height, width=width)
         self.width = width
         self.height = height
