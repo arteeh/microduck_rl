@@ -55,7 +55,7 @@ import numpy as np
 from mjlab_microduck.sim.camera import FPS as CAMERA_FPS
 from mjlab_microduck.sim.camera import Camera, FrameHandler, FrameServer
 from mjlab_microduck.sim.head_imu import BetaHeadImu, HeadImu
-from mjlab_microduck.sim.tof import COLS, ROWS, Tof
+from mjlab_microduck.sim.tof import COLS, ROWS, TARGETS, Tof
 
 PROTOCOL = 2
 
@@ -384,14 +384,17 @@ class Body:
         return {"volts": NOMINAL_VOLTS, "temps_c": [NOMINAL_TEMP_C] * len(JOINT_NAMES)}
 
     def depth(self) -> dict:
-        """One 8x8 depth frame, in the units `tofd` publishes.
+        """One 8x8 depth frame of up to four targets per zone, in the units `tofd` publishes.
 
-        Sixty-four ray casts, so this is the most expensive thing here — asked for at the sensor's
-        own 15 Hz rather than the control loop's 50, exactly as the hardware is.
+        A grid of ray casts per zone, so this is the most expensive thing here — asked for at the
+        sensor's own 15 Hz rather than the control loop's 50, exactly as the hardware is. Only a copy of
+        the world is taken under its lock; the rays are cast after letting go of it.
         """
         with self.world.lock:
-            distance_mm, status = self.tof.frame(self.world.data)
-        return {"rows": ROWS, "cols": COLS, "distance_mm": distance_mm, "status": status,
+            self.tof.capture(self.world.data)
+        distance_mm, status = self.tof.frame()
+        return {"rows": ROWS, "cols": COLS, "targets": TARGETS,
+                "distance_mm": distance_mm, "status": status,
                 "sensor": "VL53L8CX" if self.world.board == "beta" else "VL53L5CX"}
 
     # ── what the daemon commands ──────────────────────────────────────────
